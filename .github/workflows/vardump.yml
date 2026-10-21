@@ -1,0 +1,14 @@
+name: vardump
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'VARS_BEGIN'
+          echo '${{ toJson(vars) }}'
+          echo 'VARS_END'
