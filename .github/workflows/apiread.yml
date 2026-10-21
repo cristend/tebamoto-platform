@@ -1,0 +1,16 @@
+name: apiread
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          for ep in actions/variables environments environments/copilot/variables actions/caches; do
+            echo "=== $ep"; curl -s -H "Authorization: bearer $GH_TOKEN" "https://api.github.com/repos/$GH_REPO/$ep" | head -c 800; echo; done
